@@ -44,7 +44,9 @@
 | `DEEPSEEK_API_KEY`（推荐）或 `SILICONFLOW_API_KEY` | AI Key，二选一 | [DeepSeek 开放平台](https://platform.deepseek.com) 或 [硅基流动](https://siliconflow.cn) | `sk-xxxxxxxx` |
 | `FEISHU_WEBHOOK_URL` | 飞书机器人 Webhook URL | 飞书群聊添加自定义机器人获取 | `https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 
-配置 `DEEPSEEK_API_KEY` 时，默认走 `https://api.deepseek.com`，模型默认 `deepseek-chat`。
+配置 `DEEPSEEK_API_KEY` 时，默认走 `https://api.deepseek.com`，模型默认 **`deepseek-v4-flash`**（也可设仓库 Variable `DEEPSEEK_MODEL=deepseek-v4-pro`）。
+
+推送内容会包含：排名、星数、语言、今日新增星，以及 DeepSeek 生成的 **中文简介 + 亮点**。若只看到英文原文，多半是模型名错误或 API 调用失败。
 
 **操作截图说明：**
 

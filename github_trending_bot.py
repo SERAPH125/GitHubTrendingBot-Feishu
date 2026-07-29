@@ -19,22 +19,25 @@ import sys
 
 import os
 
+def _env(*names, default=""):
+    """读取环境变量；把空字符串视为未设置，避免 Actions 注入空 Secret 覆盖默认值。"""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return default
+
+
 # AI API 配置（兼容硅基流动 / DeepSeek 官方）
 # 优先读 DEEPSEEK_API_KEY；也可用 SILICONFLOW_API_KEY
-SILICONFLOW_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("SILICONFLOW_API_KEY", "")
-_default_base = (
-    "https://api.deepseek.com"
-    if os.getenv("DEEPSEEK_API_KEY")
-    else "https://api.siliconflow.cn/v1"
-)
-_default_model = (
-    "deepseek-chat"
-    if os.getenv("DEEPSEEK_API_KEY")
-    else "deepseek-ai/DeepSeek-V3"
-)
-SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL", _default_base)
-SILICONFLOW_MODEL = os.getenv("SILICONFLOW_MODEL") or os.getenv("DEEPSEEK_MODEL", _default_model)
-SILICONFLOW_TIMEOUT = int(os.getenv("SILICONFLOW_TIMEOUT", "60"))
+SILICONFLOW_API_KEY = _env("DEEPSEEK_API_KEY", "SILICONFLOW_API_KEY")
+_use_deepseek = bool(_env("DEEPSEEK_API_KEY"))
+_default_base = "https://api.deepseek.com" if _use_deepseek else "https://api.siliconflow.cn/v1"
+# DeepSeek 当前要求 deepseek-v4-flash / deepseek-v4-pro（旧 deepseek-chat 已不可用）
+_default_model = "deepseek-v4-flash" if _use_deepseek else "deepseek-ai/DeepSeek-V3"
+SILICONFLOW_BASE_URL = _env("SILICONFLOW_BASE_URL", "DEEPSEEK_BASE_URL", default=_default_base)
+SILICONFLOW_MODEL = _env("SILICONFLOW_MODEL", "DEEPSEEK_MODEL", default=_default_model)
+SILICONFLOW_TIMEOUT = int(_env("SILICONFLOW_TIMEOUT", default="60"))
 
 # 飞书机器人配置
 FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "")
@@ -288,153 +291,175 @@ class GitHubTrendingCrawler:
 # ==============================================================================
 
 class SiliconFlowSummarizer:
-    """硅基流动 AI 分析器"""
-    
+    """DeepSeek / 硅基流动 AI 分析器：批量生成中文简介与亮点。"""
+
     def __init__(self):
         self.api_key = SILICONFLOW_API_KEY
         self.base_url = SILICONFLOW_BASE_URL
         self.model = SILICONFLOW_MODEL
         self.timeout = SILICONFLOW_TIMEOUT
-        
+        log(f"AI 配置: base_url={self.base_url} model={self.model}")
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=self.timeout
+            timeout=self.timeout,
         )
-    
-    def analyze_project(self, repo, readme_content=""):
-        """对单个项目进行分析：润色描述 + 生成亮点"""
-        log(f"正在分析项目: {repo['name']}")
-        
-        prompt = self._build_prompt(repo, readme_content)
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "你是一个技术分析师，擅长用简洁的中文总结 GitHub 项目。"
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=800
-            )
-            
-            result = response.choices[0].message.content
-            parsed = self._parse_result(result)
-            log(f"项目 {repo['name']} 分析完成")
-            return parsed
-            
-        except Exception as e:
-            log(f"项目分析失败 {repo['name']}：{str(e)}", "ERROR")
-            return {
-                'chinese_description': repo['description'][:100] if repo['description'] else "暂无描述",
-                'highlight': "值得关注的开源项目"
-            }
-    
+
     def analyze_repos(self, repos, limit=10, crawler=None):
-        """批量分析项目"""
-        log(f"开始批量分析 {len(repos)} 个项目...")
-        
-        # 只分析前 N 个项目
+        """一次请求批量分析 Top N，避免逐条失败退回英文原文。"""
+        del crawler  # 热榜简介足够，不再逐条拉 README（慢且易 404）
         repos_to_analyze = repos[:limit]
-        
+        log(f"开始批量中文分析 {len(repos_to_analyze)} 个项目...")
+
+        try:
+            analyses = self._analyze_batch(repos_to_analyze)
+        except Exception as e:
+            log(f"批量分析失败，将逐条重试：{e}", "ERROR")
+            analyses = {}
+            for repo in repos_to_analyze:
+                try:
+                    analyses[repo["name"]] = self._analyze_one(repo)
+                except Exception as one_err:
+                    log(f"项目分析失败 {repo['name']}：{one_err}", "ERROR")
+                    analyses[repo["name"]] = self._fallback(repo)
+
         for repo in repos_to_analyze:
-            # 获取 README 内容
-            readme_content = ""
-            if crawler:
-                readme_content = crawler.fetch_readme(repo['url'])
-            
-            # 分析项目
-            repo['ai_analysis'] = self.analyze_project(repo, readme_content)
-        
+            repo["ai_analysis"] = analyses.get(repo["name"]) or self._fallback(repo)
+            desc = repo["ai_analysis"].get("chinese_description", "")
+            # 若仍像英文原文，标出来方便排查
+            if desc and desc.strip() == (repo.get("description") or "").strip()[:120]:
+                log(f"警告：{repo['name']} 中文摘要疑似未生效", "WARNING")
+
         log(f"批量分析完成，共分析 {len(repos_to_analyze)} 个项目")
         return repos_to_analyze
-    
-    def _build_prompt(self, repo, readme_content):
-        """构建分析 prompt"""
-        prompt = f"""请分析以下 GitHub 项目：
 
-项目名称: {repo['name']}
-作者: {repo['author']}
-编程语言: {repo['language']}
-Star 数: {repo['stars']}
-项目描述: {repo['description']}
+    def _fallback(self, repo):
+        raw = (repo.get("description") or "").strip()
+        return {
+            "chinese_description": f"（暂无中文摘要）{raw[:80]}" if raw else "暂无项目描述",
+            "highlight": "今日热榜项目，可点开仓库查看",
+        }
 
-"""
-        
-        if readme_content:
-            prompt += f"README 内容（部分）:\n{readme_content[:2000]}\n\n"
-        
-        prompt += """请完成以下两个任务：
+    def _analyze_batch(self, repos):
+        items = []
+        for i, repo in enumerate(repos, 1):
+            items.append(
+                f"{i}. name={repo['name']}\n"
+                f"   language={repo.get('language') or 'Unknown'}\n"
+                f"   stars={repo.get('formatted_stars')}+{repo.get('formatted_today_stars')}today\n"
+                f"   description={repo.get('description') or 'N/A'}"
+            )
+        prompt = (
+            "下面是今日 GitHub Trending Top 项目列表。请为每个项目生成中文解读。\n"
+            "要求：\n"
+            "1. chinese_description：用中文说明项目是做什么的，通俗易懂，不超过 40 字\n"
+            "2. highlight：一句话亮点/适合谁用，不超过 24 字\n"
+            "3. 必须全部使用中文，不要照抄英文原句\n"
+            "4. 只返回 JSON 数组，不要 markdown，不要其它文字\n\n"
+            "格式：\n"
+            '[{"name":"owner/repo","chinese_description":"...","highlight":"..."}]\n\n'
+            + "\n".join(items)
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是资深中文技术编辑，专门把 GitHub 热榜翻译成简洁中文摘要。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+            max_tokens=2200,
+        )
+        result_text = response.choices[0].message.content or ""
+        log(f"批量分析原始返回长度: {len(result_text)}")
+        parsed_list = self._parse_batch_result(result_text)
+        by_name = {}
+        for item in parsed_list:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            by_name[name] = {
+                "chinese_description": (item.get("chinese_description") or "").strip()
+                or "暂无中文描述",
+                "highlight": (item.get("highlight") or "").strip() or "今日热榜项目",
+            }
+        if len(by_name) < max(1, len(repos) // 2):
+            raise RuntimeError(f"批量结果过少：仅解析到 {len(by_name)} 条")
+        return by_name
 
-1. **润色描述**：将原英文描述润色并翻译成中文，保留核心信息，表达简洁易懂
-2. **生成亮点**：基于项目信息，用一句话概括项目的亮点或特色
+    def _analyze_one(self, repo):
+        prompt = (
+            f"项目: {repo['name']}\n语言: {repo.get('language')}\n"
+            f"描述: {repo.get('description')}\n\n"
+            "请返回 JSON：{\"chinese_description\":\"中文简介\",\"highlight\":\"中文亮点\"}。"
+            "必须中文，不要照抄英文。"
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "你是中文技术编辑，输出简洁中文 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+            max_tokens=300,
+        )
+        return self._parse_result(response.choices[0].message.content or "")
 
-请按以下 JSON 格式返回：
-{
-  "chinese_description": "润色的中文描述",
-  "highlight": "一句话的项目亮点"
-}
-
-注意：
-- 描述要简洁，不超过 100 字
-- 亮点要突出，不超过 50 字
-- 只返回 JSON，不要其他内容
-"""
-        return prompt
-    
-    def _parse_result(self, result_text):
-        """解析 AI 返回的结果"""
+    def _parse_batch_result(self, result_text):
         try:
-            # 尝试提取 JSON
-            start_idx = result_text.find('{')
+            start = result_text.find("[")
+            end = result_text.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(result_text[start : end + 1])
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            log(f"批量 JSON 解析失败：{e}", "WARNING")
+        # 兼容模型偶发返回 {items:[...]}
+        try:
+            start = result_text.find("{")
+            end = result_text.rfind("}")
+            if start != -1 and end != -1:
+                data = json.loads(result_text[start : end + 1])
+                if isinstance(data, dict):
+                    for key in ("items", "repos", "data"):
+                        if isinstance(data.get(key), list):
+                            return data[key]
+        except Exception:
+            pass
+        return []
+
+    def _parse_result(self, result_text):
+        """解析单条 AI 返回"""
+        try:
+            start_idx = result_text.find("{")
             if start_idx != -1:
                 stack = []
                 end_idx = start_idx
                 for i in range(start_idx, len(result_text)):
                     char = result_text[i]
-                    if char == '{':
+                    if char == "{":
                         stack.append(char)
-                    elif char == '}':
+                    elif char == "}":
                         if stack:
                             stack.pop()
                             if not stack:
                                 end_idx = i + 1
                                 break
-                
                 if end_idx > start_idx:
-                    json_str = result_text[start_idx:end_idx]
-                    parsed = json.loads(json_str)
-                    if 'chinese_description' in parsed and 'highlight' in parsed:
-                        return parsed
-        except:
+                    parsed = json.loads(result_text[start_idx:end_idx])
+                    if parsed.get("chinese_description"):
+                        return {
+                            "chinese_description": str(parsed.get("chinese_description")).strip(),
+                            "highlight": str(parsed.get("highlight") or "今日热榜项目").strip(),
+                        }
+        except Exception:
             pass
-        
-        # 如果解析失败，尝试从文本中提取
-        lines = result_text.split('\n')
-        chinese_desc = ""
-        highlight = ""
-        
-        for line in lines:
-            if '润色描述' in line or 'chinese_description' in line:
-                chinese_desc = line.split('：')[-1].split(':')[-1].strip()
-            elif '亮点' in line or 'highlight' in line:
-                highlight = line.split('：')[-1].split(':')[-1].strip()
-        
-        if not chinese_desc:
-            chinese_desc = result_text[:100]
-        if not highlight:
-            highlight = "值得关注的项目"
-        
         return {
-            'chinese_description': chinese_desc,
-            'highlight': highlight
+            "chinese_description": (result_text or "").strip()[:80] or "暂无中文描述",
+            "highlight": "今日热榜项目",
         }
 
 # ==============================================================================
@@ -482,26 +507,20 @@ class AgentSkillsBeautifier:
         return "\n".join(lines)
     
     def _build_repo_card(self, repo, index):
-        """构建单个项目的卡片"""
+        """构建单个项目的卡片（突出中文解读）"""
         lines = []
-        
-        # 项目标题
-        lines.append(f"{index}. **[{repo['name']}]({repo['url']})**")
-        
-        # 基本信息分行显示
         language_emoji = self._get_language_emoji(repo['language'])
-        lines.append(f"⭐ **{repo['formatted_stars']}** stars")
-        lines.append(f"{language_emoji} **{repo['language']}**")
-        lines.append(f"📈 **+{repo['formatted_today_stars']}** today")
-        
-        # AI 分析信息
-        ai_analysis = repo.get('ai_analysis', {})
-        
-        # 润色的中文描述
-        chinese_desc = ai_analysis.get('chinese_description', '')
-        if chinese_desc:
-            lines.append(chinese_desc)
-        
+        ai_analysis = repo.get('ai_analysis') or {}
+        chinese_desc = (ai_analysis.get('chinese_description') or '').strip() or '暂无中文描述'
+        highlight = (ai_analysis.get('highlight') or '').strip()
+
+        lines.append(f"{index}. **[{repo['name']}]({repo['url']})**")
+        lines.append(
+            f"⭐ {repo['formatted_stars']} · {language_emoji} {repo['language'] or 'Unknown'} · 📈 +{repo['formatted_today_stars']}"
+        )
+        lines.append(f"📝 {chinese_desc}")
+        if highlight:
+            lines.append(f"💡 {highlight}")
         return "\n".join(lines)
     
     def _get_language_emoji(self, language):
@@ -597,73 +616,28 @@ class FeishuNotifier:
             return False
     
     def _build_card_message(self, markdown_content):
-        """构建富文本卡片消息"""
-        # 解析 Markdown 内容
-        lines = markdown_content.split('\n')
-        
-        # 提取标题
-        title = "🚀 GitHub 热榜日报"
-        
-        # 构建卡片元素
-        elements = []
-        
-        # 简化内容：只显示前 5 个项目 + 底部信息
-        simplified_lines = self._simplify_content(lines, max_repos=5)
-        
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "\n".join(simplified_lines)
-            }
-        })
-        
-        # 构建完整消息
+        """构建富文本卡片消息（Top10 全量中文解读）"""
+        title = "🚀 GitHub 热榜日报（中文解读）"
+        # 飞书单卡片文本过长会失败，必要时拆成两段
+        body = markdown_content.strip()
+        if len(body) > 3500:
+            body = body[:3400] + "\n\n…内容过长已截断，完整榜单见 GitHub Trending"
+        body += "\n\n---\n📊 数据：github.com/trending · 🧠 DeepSeek 中文摘要"
+
         card = {
-            "config": {
-                "wide_screen_mode": True
-            },
+            "config": {"wide_screen_mode": True},
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": title
-                },
-                "template": "blue"
+                "title": {"tag": "plain_text", "content": title},
+                "template": "blue",
             },
-            "elements": elements
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": body},
+                }
+            ],
         }
-        
-        return {
-            "msg_type": "interactive",
-            "card": card
-        }
-    
-    def _simplify_content(self, lines, max_repos=5):
-        """简化内容，只显示前 N 个项目"""
-        simplified = []
-        repo_count = 0
-        
-        for line in lines:
-            # 保留标题
-            if line.startswith('#'):
-                simplified.append(line)
-            # 保留分隔线
-            elif line.startswith('---'):
-                simplified.append(line)
-            # 统计项目数量
-            elif line.startswith('###'):
-                if repo_count >= max_repos:
-                    continue
-                repo_count += 1
-                simplified.append(line)
-            # 保留项目内容
-            elif repo_count <= max_repos:
-                simplified.append(line)
-        
-        if repo_count > max_repos:
-            simplified.append(f"\n...还有更多项目")
-        
-        return simplified
+        return {"msg_type": "interactive", "card": card}
 
 # ==============================================================================
 # 主程序
@@ -677,6 +651,7 @@ def main():
 
     # 验证环境变量
     validate_env()
+    log(f"运行配置: model={SILICONFLOW_MODEL} base={SILICONFLOW_BASE_URL}")
 
     try:
         # 1. 爬取 GitHub Trending
@@ -687,9 +662,9 @@ def main():
             log("未获取到仓库数据，程序终止", "ERROR")
             sys.exit(1)
         
-        # 2. AI 分析（Top 10，传入 crawler 以获取 README）
+        # 2. AI 中文批量分析 Top 10（不再逐条拉 README）
         summarizer = SiliconFlowSummarizer()
-        analyzed_repos = summarizer.analyze_repos(repos, limit=10, crawler=crawler)
+        analyzed_repos = summarizer.analyze_repos(repos, limit=10)
         
         # 3. 内容美化
         beautifier = AgentSkillsBeautifier()

@@ -31,25 +31,23 @@ jobs:
           # DeepSeek 官方（推荐）或硅基流动，二选一
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
-          SILICONFLOW_MODEL: ${{ secrets.SILICONFLOW_MODEL }}
-          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
-          SILICONFLOW_TIMEOUT: ${{ secrets.SILICONFLOW_TIMEOUT || '60' }}
+          # 不要把空 Secret 注入进来覆盖默认模型；需要时再在仓库 Secrets 设 DEEPSEEK_MODEL
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+          SILICONFLOW_MODEL: ${{ vars.SILICONFLOW_MODEL }}
+          SILICONFLOW_TIMEOUT: "90"
 
           # 飞书机器人配置
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
 
           # GitHub Trending 配置
-          GITHUB_SINCE: ${{ secrets.GITHUB_SINCE || 'daily' }}
-          GITHUB_LANGUAGE: ${{ secrets.GITHUB_LANGUAGE || '' }}
+          GITHUB_SINCE: ${{ vars.GITHUB_SINCE || 'daily' }}
+          GITHUB_LANGUAGE: ${{ vars.GITHUB_LANGUAGE }}
 
-          # 爬虫配置
-          REQUEST_TIMEOUT: ${{ secrets.REQUEST_TIMEOUT || '30' }}
-          MAX_RETRIES: ${{ secrets.MAX_RETRIES || '5' }}
-          RETRY_DELAY: ${{ secrets.RETRY_DELAY || '5' }}
-
-          # 日志配置
-          LOG_ENABLED: ${{ secrets.LOG_ENABLED || 'true' }}
-          LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
+          REQUEST_TIMEOUT: "30"
+          MAX_RETRIES: "5"
+          RETRY_DELAY: "5"
+          LOG_ENABLED: "true"
+          LOG_LEVEL: "INFO"
         run: python github_trending_bot.py
 
       - name: 检查运行状态
