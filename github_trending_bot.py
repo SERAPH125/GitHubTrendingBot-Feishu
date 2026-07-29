@@ -325,7 +325,7 @@ class SiliconFlowSummarizer:
 
         for repo in repos_to_analyze:
             repo["ai_analysis"] = analyses.get(repo["name"]) or self._fallback(repo)
-            desc = repo["ai_analysis"].get("chinese_description", "")
+            desc = repo["ai_analysis"].get("intro") or repo["ai_analysis"].get("chinese_description", "")
             # 若仍像英文原文，标出来方便排查
             if desc and desc.strip() == (repo.get("description") or "").strip()[:120]:
                 log(f"警告：{repo['name']} 中文摘要疑似未生效", "WARNING")
@@ -333,32 +333,76 @@ class SiliconFlowSummarizer:
         log(f"批量分析完成，共分析 {len(repos_to_analyze)} 个项目")
         return repos_to_analyze
 
+    CATEGORY_CHOICES = [
+        "🤖 AI 智能体与大模型生态",
+        "🛠️ 开发者工具与基础设施",
+        "📈 量化金融与数据引擎",
+        "🎨 设计创作与多媒体",
+        "🧩 其它值得一看",
+    ]
+
     def _fallback(self, repo):
         raw = (repo.get("description") or "").strip()
         return {
-            "chinese_description": (
-                f"这是一个开源项目。官方简介：{raw[:120]}。当前缺少更详细中文解读，建议点进仓库看 README。"
+            "category": "🧩 其它值得一看",
+            "intro": (
+                f"官方简介：{raw[:100]}。当前缺少更细中文解读，建议点进仓库看 README。"
                 if raw
-                else "暂无项目描述，建议点进仓库查看 README。"
+                else "暂无项目简介，建议点进仓库查看 README。"
             ),
-            "audience": "对相关技术感兴趣的开发者",
-            "highlight": "今日热榜项目，可点开仓库进一步了解",
+            "highlight": "今日登上 GitHub 热榜，可先收藏再细看。",
+            "scenario": "适合想快速了解该开源方向的开发者浏览试用。",
         }
 
     def _normalize_analysis(self, item, repo=None):
-        desc = (item.get("chinese_description") or item.get("summary") or "").strip()
-        audience = (item.get("audience") or item.get("who") or "").strip()
-        highlight = (item.get("highlight") or item.get("why_hot") or "").strip()
-        if not desc and repo is not None:
+        intro = (
+            item.get("intro")
+            or item.get("chinese_description")
+            or item.get("summary")
+            or item.get("简介")
+            or ""
+        ).strip()
+        highlight = (
+            item.get("highlight")
+            or item.get("亮点")
+            or item.get("why_hot")
+            or ""
+        ).strip()
+        scenario = (
+            item.get("scenario")
+            or item.get("应用场景")
+            or item.get("audience")
+            or ""
+        ).strip()
+        category = (item.get("category") or item.get("分类") or "").strip()
+        if category not in self.CATEGORY_CHOICES:
+            category = self._guess_category(repo, intro + highlight + scenario)
+        if not intro and repo is not None:
             return self._fallback(repo)
         return {
-            "chinese_description": desc or "暂无中文描述",
-            "audience": audience or "对相关技术感兴趣的开发者",
-            "highlight": highlight or "今日热榜项目",
+            "category": category,
+            "intro": intro or "暂无简介",
+            "highlight": highlight or "今日热榜项目，可点开仓库进一步了解。",
+            "scenario": scenario or "适合对该技术领域感兴趣的开发者了解试用。",
+            # 兼容旧字段，避免其它逻辑读空
+            "chinese_description": intro,
+            "audience": scenario,
         }
 
+    def _guess_category(self, repo, text):
+        blob = f"{(repo or {}).get('name','')} {(repo or {}).get('description','')} {text}".lower()
+        if any(k in blob for k in ("trading", "quant", "stock", "回测", "量化", "a股", "etf", "finance")):
+            return "📈 量化金融与数据引擎"
+        if any(k in blob for k in ("agent", "llm", "openai", "claude", "gpt", "speech", "ai ", "模型", "智能体")):
+            return "🤖 AI 智能体与大模型生态"
+        if any(k in blob for k in ("jenkins", "devops", "cli", "infra", "gis", "file manager", "deploy", "docker")):
+            return "🛠️ 开发者工具与基础设施"
+        if any(k in blob for k in ("design", "video", "image", "3d", "editor", "creative")):
+            return "🎨 设计创作与多媒体"
+        return "🧩 其它值得一看"
+
     def _analyze_batch(self, repos):
-        """参考 GithubCollectAgent / n8n-github-insight：大白话解读，而非电报式翻译。"""
+        """按用户期望格式：分类 + 简介 + 亮点 + 应用场景。"""
         items = []
         for i, repo in enumerate(repos, 1):
             items.append(
@@ -367,20 +411,22 @@ class SiliconFlowSummarizer:
                 f"   stars={repo.get('formatted_stars')} (+{repo.get('formatted_today_stars')} today)\n"
                 f"   description={repo.get('description') or 'N/A'}"
             )
+        cats = " / ".join(self.CATEGORY_CHOICES)
         prompt = (
-            "下面是今日 GitHub Trending Top 项目。请为每个项目写「能看懂」的中文解读。\n"
-            "风格参考：像在跟同事口头介绍，拒绝机翻口号，拒绝只堆术语。\n\n"
-            "每个项目必须包含 3 个字段：\n"
-            "1. chinese_description：80～140 字。先说它是什么产品/工具，再说解决什么问题、"
-            "核心怎么用；必要时用一句类比（例如「类似某某，但更偏…」）。\n"
-            "2. audience：20～40 字。明确适合谁（例如前端、量化、运维、AI 应用开发者）。\n"
-            "3. highlight：30～50 字。今天值得扫一眼的原因，或最吸引人的一点。\n\n"
-            "硬性要求：\n"
-            "- 全部中文，不要照抄英文原句\n"
-            "- 不要空泛夸奖（如「非常强大」「值得关注」单独成句）\n"
-            "- 只返回 JSON 数组，不要 markdown，不要其它文字\n\n"
-            "格式示例：\n"
-            '[{"name":"owner/repo","chinese_description":"...","audience":"...","highlight":"..."}]\n\n'
+            "下面是今日 GitHub Trending Top 项目。请写成「科技早报」风格的中文解读。\n"
+            "读者可能不懂细分术语，要用大白话，像下面这样清楚：\n"
+            "简介：吴恩达团队推出的轻量级 Python 库。\n"
+            "亮点：统一对接 OpenAI/Anthropic/Google 等多家模型，降低多模型集成门槛。\n"
+            "应用场景：要在业务里同时试用多家大模型、并想随时切换供应商时。\n\n"
+            "每个项目必须返回字段：\n"
+            f"1. category：只能从这些里选一个——{cats}\n"
+            "2. intro（简介）：40～90 字。先说「谁做的/什么东西」，再说核心能力。\n"
+            "3. highlight（亮点）：40～90 字。写具体能力或差异点，不要空泛夸奖。\n"
+            "4. scenario（应用场景）：30～70 字。写「什么人、在什么情况下会用到」。\n\n"
+            "硬性要求：全中文；不要照抄英文原句；只返回 JSON 数组；不要 markdown。\n"
+            "格式：\n"
+            '[{"name":"owner/repo","category":"🤖 AI 智能体与大模型生态",'
+            '"intro":"...","highlight":"...","scenario":"..."}]\n\n'
             + "\n".join(items)
         )
         response = self.client.chat.completions.create(
@@ -389,14 +435,14 @@ class SiliconFlowSummarizer:
                 {
                     "role": "system",
                     "content": (
-                        "你是资深中文技术编辑，擅长把 GitHub 热榜讲成人话。"
-                        "读者不一定熟悉每个细分领域，所以要用通俗中文解释清楚项目到底干什么。"
+                        "你是中文科技媒体编辑，擅长把 GitHub 热榜整理成分类早报："
+                        "有简介、有亮点、有应用场景，读完就知道项目能干嘛。"
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.5,
-            max_tokens=4500,
+            temperature=0.55,
+            max_tokens=5000,
         )
         result_text = response.choices[0].message.content or ""
         log(f"批量分析原始返回长度: {len(result_text)}")
@@ -412,25 +458,27 @@ class SiliconFlowSummarizer:
         return by_name
 
     def _analyze_one(self, repo):
+        cats = " / ".join(self.CATEGORY_CHOICES)
         prompt = (
             f"项目: {repo['name']}\n语言: {repo.get('language')}\n"
             f"描述: {repo.get('description')}\n\n"
             "请返回 JSON："
-            '{"chinese_description":"80-140字中文解读：是什么、解决什么问题、怎么用",'
-            '"audience":"适合谁","highlight":"今天为何值得看"}。'
-            "必须中文大白话，不要照抄英文，不要空泛夸奖。"
+            '{"name":"owner/repo","category":"...", "intro":"简介",'
+            '"highlight":"亮点","scenario":"应用场景"}。\n'
+            f"category 只能是：{cats}\n"
+            "风格：科技早报，大白话，具体，不要空夸。"
         )
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {
                     "role": "system",
-                    "content": "你是中文技术编辑，把开源项目讲成人话，输出 JSON。",
+                    "content": "你是中文科技媒体编辑，输出分类早报 JSON。",
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.5,
-            max_tokens=500,
+            temperature=0.55,
+            max_tokens=700,
         )
         return self._normalize_analysis(
             self._parse_result(response.choices[0].message.content or ""),
@@ -520,39 +568,59 @@ class AgentSkillsBeautifier:
             return self._fallback_beautify(repos)
     
     def _build_markdown(self, repos, date):
-        """构建 Markdown 格式的内容"""
-        lines = []
-        
-        # 标题（带日期）
-        lines.append(f"# 🚀 GitHub 热榜日报 - {date}")
-        lines.append("")
-        
-        # 按顺序展示所有项目
-        for i, repo in enumerate(repos, 1):
-            lines.append(self._build_repo_card(repo, i))
-            lines.append("")
-        
-        return "\n".join(lines)
-    
-    def _build_repo_card(self, repo, index):
-        """构建单个项目的卡片（完整中文解读：是什么 / 适合谁 / 看点）"""
-        lines = []
-        language_emoji = self._get_language_emoji(repo['language'])
-        ai_analysis = repo.get('ai_analysis') or {}
-        chinese_desc = (ai_analysis.get('chinese_description') or '').strip() or '暂无中文描述'
-        audience = (ai_analysis.get('audience') or '').strip()
-        highlight = (ai_analysis.get('highlight') or '').strip()
+        """按分类输出：简介 / 亮点 / 应用场景。"""
+        lines = [f"# 🚀 GitHub 热榜日报 - {date}", ""]
+        grouped = {}
+        order = list(SiliconFlowSummarizer.CATEGORY_CHOICES)
+        for repo in repos:
+            ai = repo.get("ai_analysis") or {}
+            cat = ai.get("category") or "🧩 其它值得一看"
+            grouped.setdefault(cat, []).append(repo)
 
-        lines.append(f"**{index}. [{repo['name']}]({repo['url']})**")
-        lines.append(
-            f"⭐ {repo['formatted_stars']} · {language_emoji} {repo['language'] or 'Unknown'} · 📈 今日+{repo['formatted_today_stars']}"
-        )
-        lines.append(f"📝 **是什么**：{chinese_desc}")
-        if audience:
-            lines.append(f"👥 **适合谁**：{audience}")
-        if highlight:
-            lines.append(f"💡 **看点**：{highlight}")
+        for cat in order:
+            items = grouped.get(cat) or []
+            if not items:
+                continue
+            lines.append(f"**{cat}**")
+            lines.append("")
+            for repo in items:
+                lines.append(self._build_repo_card(repo))
+                lines.append("")
+        # 兜底：未识别分类
+        for cat, items in grouped.items():
+            if cat in order:
+                continue
+            lines.append(f"**{cat}**")
+            lines.append("")
+            for repo in items:
+                lines.append(self._build_repo_card(repo))
+                lines.append("")
         return "\n".join(lines)
+
+    def _build_repo_card(self, repo, index=None):
+        """单项目：标题 + 简介 + 亮点 + 应用场景。"""
+        del index
+        ai = repo.get("ai_analysis") or {}
+        intro = (ai.get("intro") or ai.get("chinese_description") or "").strip() or "暂无简介"
+        highlight = (ai.get("highlight") or "").strip() or "今日热榜项目"
+        scenario = (ai.get("scenario") or ai.get("audience") or "").strip() or "适合相关开发者了解试用"
+        # 展示成 owner / repo，更接近早报阅读习惯
+        name = repo.get("name") or ""
+        pretty = name.replace("/", " / ") if "/" in name else name
+        stars = (
+            f"⭐ {repo.get('formatted_stars')} · "
+            f"{self._get_language_emoji(repo.get('language'))} {repo.get('language') or 'Unknown'} · "
+            f"今日+{repo.get('formatted_today_stars')}"
+        )
+        return "\n".join(
+            [
+                f"**[{pretty}]({repo.get('url')})**",
+                stars,
+                f"简介：{intro}",
+                f"亮点：{highlight}",
+                f"应用场景：{scenario}",
+            ]
+        )
     
     def _get_language_emoji(self, language):
         """获取编程语言的 emoji"""
@@ -648,7 +716,7 @@ class FeishuNotifier:
     
     def _build_card_message(self, markdown_content):
         """构建富文本卡片消息（Top10 全量中文解读）"""
-        title = "🚀 GitHub 热榜日报（中文详解）"
+        title = "🚀 GitHub 热榜早报（分类解读）"
         body = markdown_content.strip()
         body += "\n\n---\n📊 数据：github.com/trending · 🧠 DeepSeek 白话解读"
 
