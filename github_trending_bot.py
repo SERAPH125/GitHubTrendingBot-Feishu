@@ -323,6 +323,8 @@ class SiliconFlowSummarizer:
                     log(f"项目分析失败 {repo['name']}：{one_err}", "ERROR")
                     analyses[repo["name"]] = self._fallback(repo)
 
+        analyses = self._fix_duplicate_scenarios(repos_to_analyze, analyses)
+
         for repo in repos_to_analyze:
             repo["ai_analysis"] = analyses.get(repo["name"]) or self._fallback(repo)
             desc = repo["ai_analysis"].get("intro") or repo["ai_analysis"].get("chinese_description", "")
@@ -341,8 +343,21 @@ class SiliconFlowSummarizer:
         "🧩 其它值得一看",
     ]
 
+    GENERIC_SCENARIO_MARKERS = (
+        "对该技术",
+        "相关开发者",
+        "了解试用",
+        "浏览试用",
+        "感兴趣的开发者",
+        "快速了解该开源",
+        "适合开发者",
+        "值得关注",
+    )
+
     def _fallback(self, repo):
         raw = (repo.get("description") or "").strip()
+        name = repo.get("name") or "该项目"
+        short = name.split("/")[-1]
         return {
             "category": "🧩 其它值得一看",
             "intro": (
@@ -350,9 +365,95 @@ class SiliconFlowSummarizer:
                 if raw
                 else "暂无项目简介，建议点进仓库查看 README。"
             ),
-            "highlight": "今日登上 GitHub 热榜，可先收藏再细看。",
-            "scenario": "适合想快速了解该开源方向的开发者浏览试用。",
+            "highlight": f"{short} 今日登上 GitHub 热榜，可先收藏再细看。",
+            "scenario": self._scenario_from_parts(repo, raw[:60], f"可用来快速试用 {short}"),
         }
+
+    def _is_generic_scenario(self, text):
+        t = (text or "").strip()
+        if len(t) < 12:
+            return True
+        return any(m in t for m in self.GENERIC_SCENARIO_MARKERS)
+
+    def _scenario_from_parts(self, repo, intro, highlight):
+        """用简介/亮点拼一条不重复的应用场景，避免全员同一句套话。"""
+        name = (repo.get("name") or "该项目").split("/")[-1]
+        lang = repo.get("language") or "相关"
+        seed = f"{intro} {highlight}".strip()
+        if "量化" in seed or "回测" in seed or "股票" in seed or "交易" in seed:
+            return f"做 A 股/ETF 研究或策略回测时，可用 {name} 搭本地数据与实验环境。"
+        if "模型" in seed or "Agent" in seed or "智能体" in seed or "LLM" in seed.upper() or "大模型" in seed:
+            return f"在业务里接入/编排 AI 能力，或想替换某个模型供应商时，可把 {name} 放进原型验证。"
+        if "CI" in seed or "Jenkins" in seed or "部署" in seed or "流水线" in seed:
+            return f"团队要搭或维护自动化构建发布流水线时，可用 {name} 承接 CI/CD。"
+        if "文件" in seed or "终端" in seed or "CLI" in seed:
+            return f"日常在终端里高频翻目录、整理项目文件时，可用 {name} 提升操作效率。"
+        if "语音" in seed or "视频" in seed:
+            return f"要做本地语音/视频理解或交互原型时，可直接基于 {name} 起步。"
+        if "GIS" in seed or "地理" in seed or "地图" in seed:
+            return f"需要在 Web/Notebook 里看地图、分析空间数据时，可用 {name}。"
+        # 最后用项目名保证每条都不同
+        tip = (intro or highlight or repo.get("description") or lang).strip()
+        tip = tip[:28].rstrip("，。；; ")
+        return f"当你需要「{tip}」这类能力时，可以优先试用 {name}。"
+
+    def _fix_duplicate_scenarios(self, repos, analyses):
+        """批量结果若应用场景重复/套话，逐条重写，保证每条都不同。"""
+        seen = {}
+        for repo in repos:
+            name = repo["name"]
+            item = analyses.get(name) or self._fallback(repo)
+            scenario = (item.get("scenario") or "").strip()
+            dup = scenario in seen or self._is_generic_scenario(scenario)
+            if dup:
+                log(f"应用场景需重写：{name} <- {scenario[:40]}", "WARNING")
+                try:
+                    rewritten = self._rewrite_scenario(repo, item)
+                    item = dict(item)
+                    item["scenario"] = rewritten
+                    item["audience"] = rewritten
+                except Exception as e:
+                    log(f"应用场景重写失败 {name}：{e}", "WARNING")
+                    item = dict(item)
+                    item["scenario"] = self._scenario_from_parts(
+                        repo, item.get("intro", ""), item.get("highlight", "")
+                    )
+                    item["audience"] = item["scenario"]
+            seen[item["scenario"]] = name
+            analyses[name] = item
+        return analyses
+
+    def _rewrite_scenario(self, repo, item):
+        prompt = (
+            f"项目: {repo['name']}\n"
+            f"简介: {item.get('intro')}\n"
+            f"亮点: {item.get('highlight')}\n"
+            f"原始描述: {repo.get('description')}\n\n"
+            "请只返回一条「应用场景」中文句子（30～70字）：\n"
+            "- 必须写成「什么人 + 在什么具体情况下 + 用它做什么」\n"
+            "- 禁止套话：不要写「适合开发者了解试用」「对该技术感兴趣」这类空话\n"
+            "- 不要和其他项目撞车，要能看出这是本项目专属场景\n"
+            "- 只返回场景正文，不要 JSON，不要前缀"
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你专门写具体应用场景，拒绝空泛套话。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=160,
+        )
+        text = (response.choices[0].message.content or "").strip().strip('"“”')
+        text = text.replace("应用场景：", "").replace("应用场景:", "").strip()
+        if self._is_generic_scenario(text):
+            return self._scenario_from_parts(
+                repo, item.get("intro", ""), item.get("highlight", "")
+            )
+        return text
 
     def _normalize_analysis(self, item, repo=None):
         intro = (
@@ -368,23 +469,20 @@ class SiliconFlowSummarizer:
             or item.get("why_hot")
             or ""
         ).strip()
-        scenario = (
-            item.get("scenario")
-            or item.get("应用场景")
-            or item.get("audience")
-            or ""
-        ).strip()
+        # 不再把 audience 当应用场景，避免批量时被写成同一句「适合谁」
+        scenario = (item.get("scenario") or item.get("应用场景") or "").strip()
         category = (item.get("category") or item.get("分类") or "").strip()
         if category not in self.CATEGORY_CHOICES:
             category = self._guess_category(repo, intro + highlight + scenario)
         if not intro and repo is not None:
             return self._fallback(repo)
+        if (not scenario or self._is_generic_scenario(scenario)) and repo is not None:
+            scenario = self._scenario_from_parts(repo, intro, highlight)
         return {
             "category": category,
             "intro": intro or "暂无简介",
             "highlight": highlight or "今日热榜项目，可点开仓库进一步了解。",
-            "scenario": scenario or "适合对该技术领域感兴趣的开发者了解试用。",
-            # 兼容旧字段，避免其它逻辑读空
+            "scenario": scenario,
             "chinese_description": intro,
             "audience": scenario,
         }
@@ -414,15 +512,19 @@ class SiliconFlowSummarizer:
         cats = " / ".join(self.CATEGORY_CHOICES)
         prompt = (
             "下面是今日 GitHub Trending Top 项目。请写成「科技早报」风格的中文解读。\n"
-            "读者可能不懂细分术语，要用大白话，像下面这样清楚：\n"
+            "好例子：\n"
             "简介：吴恩达团队推出的轻量级 Python 库。\n"
             "亮点：统一对接 OpenAI/Anthropic/Google 等多家模型，降低多模型集成门槛。\n"
-            "应用场景：要在业务里同时试用多家大模型、并想随时切换供应商时。\n\n"
+            "应用场景：后端要把同一套业务接到多家大模型，并希望一行配置就能切换供应商时。\n\n"
+            "坏例子（禁止）：\n"
+            "应用场景：适合对该技术感兴趣的开发者了解试用。\n"
+            "应用场景：适合相关开发者浏览试用。\n\n"
             "每个项目必须返回字段：\n"
             f"1. category：只能从这些里选一个——{cats}\n"
             "2. intro（简介）：40～90 字。先说「谁做的/什么东西」，再说核心能力。\n"
             "3. highlight（亮点）：40～90 字。写具体能力或差异点，不要空泛夸奖。\n"
-            "4. scenario（应用场景）：30～70 字。写「什么人、在什么情况下会用到」。\n\n"
+            "4. scenario（应用场景）：30～70 字。必须是「什么人 + 什么具体工作场景 + 用它完成什么」；"
+            "每个项目都要不同，禁止互相复制，禁止空泛套话。\n\n"
             "硬性要求：全中文；不要照抄英文原句；只返回 JSON 数组；不要 markdown。\n"
             "格式：\n"
             '[{"name":"owner/repo","category":"🤖 AI 智能体与大模型生态",'
@@ -448,12 +550,13 @@ class SiliconFlowSummarizer:
         result_text = response.choices[0].message.content or ""
         log(f"批量分析原始返回长度: {len(result_text)}")
         parsed_list = self._parse_batch_result(result_text)
+        repo_by_name = {r["name"]: r for r in repos}
         by_name = {}
         for item in parsed_list:
             name = (item.get("name") or "").strip()
             if not name:
                 continue
-            by_name[name] = self._normalize_analysis(item)
+            by_name[name] = self._normalize_analysis(item, repo=repo_by_name.get(name))
         if len(by_name) < max(1, len(repos) // 2):
             raise RuntimeError(f"批量结果过少：仅解析到 {len(by_name)} 条")
         return by_name
@@ -467,7 +570,8 @@ class SiliconFlowSummarizer:
             '{"name":"owner/repo","category":"...", "intro":"简介",'
             '"highlight":"亮点","scenario":"应用场景"}。\n'
             f"category 只能是：{cats}\n"
-            "风格：科技早报，大白话，具体，不要空夸。"
+            "风格：科技早报，大白话，具体，不要空夸。\n"
+            "应用场景必须写具体工作情境，禁止「适合开发者了解试用」这类套话。"
         )
         response = self.client.chat.completions.create(
             model=self.model,
@@ -604,7 +708,7 @@ class AgentSkillsBeautifier:
         ai = repo.get("ai_analysis") or {}
         intro = (ai.get("intro") or ai.get("chinese_description") or "").strip() or "暂无简介"
         highlight = (ai.get("highlight") or "").strip() or "今日热榜项目"
-        scenario = (ai.get("scenario") or ai.get("audience") or "").strip() or "适合相关开发者了解试用"
+        scenario = (ai.get("scenario") or "").strip() or "场景待补充，建议点进仓库 README 查看用法"
         # 展示成 owner / repo，更接近早报阅读习惯
         name = repo.get("name") or ""
         pretty = name.replace("/", " / ") if "/" in name else name
