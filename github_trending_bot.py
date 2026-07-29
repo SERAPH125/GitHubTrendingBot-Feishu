@@ -305,11 +305,11 @@ class SiliconFlowSummarizer:
             timeout=self.timeout,
         )
 
-    def analyze_repos(self, repos, limit=10, crawler=None):
-        """一次请求批量分析 Top N，避免逐条失败退回英文原文。"""
+    def analyze_repos(self, repos, limit=None, crawler=None):
+        """一次请求批量分析；limit=None 表示页面抓到多少就分析多少。"""
         del crawler  # 热榜简介足够，不再逐条拉 README（慢且易 404）
-        repos_to_analyze = repos[:limit]
-        log(f"开始批量中文分析 {len(repos_to_analyze)} 个项目...")
+        repos_to_analyze = list(repos) if limit is None else repos[:limit]
+        log(f"开始批量中文分析 {len(repos_to_analyze)} 个项目（页面可见全部）...")
 
         try:
             analyses = self._analyze_batch(repos_to_analyze)
@@ -442,7 +442,8 @@ class SiliconFlowSummarizer:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.55,
-            max_tokens=5000,
+            # 页面条目增多时预留输出空间（约 13～25 条）
+            max_tokens=min(8000, 400 * max(8, len(repos))),
         )
         result_text = response.choices[0].message.content or ""
         log(f"批量分析原始返回长度: {len(result_text)}")
@@ -654,7 +655,7 @@ class AgentSkillsBeautifier:
         
         content = f"🚀 GitHub 热榜日报 - {date}\n\n"
         
-        for i, repo in enumerate(repos[:10], 1):
+        for i, repo in enumerate(repos, 1):
             content += f"{i}. [{repo['name']}]({repo['url']}) by {repo['author']}\n"
             content += f"   ⭐ {repo['formatted_stars']} stars\n"
             content += f"   {self._get_language_emoji(repo['language'])} {repo['language']}\n"
@@ -778,9 +779,10 @@ def main():
             log("未获取到仓库数据，程序终止", "ERROR")
             sys.exit(1)
         
-        # 2. AI 中文批量分析 Top 10（不再逐条拉 README）
+        # 2. AI 中文批量分析：GitHub 页面公开多少条就分析/推送多少条
+        log(f"本次将推送页面公开的全部 {len(repos)} 个项目")
         summarizer = SiliconFlowSummarizer()
-        analyzed_repos = summarizer.analyze_repos(repos, limit=10)
+        analyzed_repos = summarizer.analyze_repos(repos, limit=None)
         
         # 3. 内容美化
         beautifier = AgentSkillsBeautifier()
