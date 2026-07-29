@@ -358,6 +358,9 @@ class SiliconFlowSummarizer:
         raw = (repo.get("description") or "").strip()
         name = repo.get("name") or "该项目"
         short = name.split("/")[-1]
+        tech, general = self._scenario_pair_from_parts(
+            repo, raw[:60], f"可用来快速试用 {short}"
+        )
         return {
             "category": "🧩 其它值得一看",
             "intro": (
@@ -366,7 +369,9 @@ class SiliconFlowSummarizer:
                 else "暂无项目简介，建议点进仓库查看 README。"
             ),
             "highlight": f"{short} 今日登上 GitHub 热榜，可先收藏再细看。",
-            "scenario": self._scenario_from_parts(repo, raw[:60], f"可用来快速试用 {short}"),
+            "scenario_tech": tech,
+            "scenario_general": general,
+            "scenario": f"技术向：{tech}；非技术向：{general}",
         }
 
     def _is_generic_scenario(self, text):
@@ -375,85 +380,102 @@ class SiliconFlowSummarizer:
             return True
         return any(m in t for m in self.GENERIC_SCENARIO_MARKERS)
 
-    def _scenario_from_parts(self, repo, intro, highlight):
-        """用简介/亮点拼一条不重复的应用场景，避免全员同一句套话。"""
+    def _scenario_pair_from_parts(self, repo, intro, highlight):
+        """生成技术向 + 非技术向两条不重复场景。"""
         name = (repo.get("name") or "该项目").split("/")[-1]
-        lang = repo.get("language") or "相关"
         seed = f"{intro} {highlight}".strip()
         if "量化" in seed or "回测" in seed or "股票" in seed or "交易" in seed:
-            return f"做 A 股/ETF 研究或策略回测时，可用 {name} 搭本地数据与实验环境。"
-        if "模型" in seed or "Agent" in seed or "智能体" in seed or "LLM" in seed.upper() or "大模型" in seed:
-            return f"在业务里接入/编排 AI 能力，或想替换某个模型供应商时，可把 {name} 放进原型验证。"
-        if "CI" in seed or "Jenkins" in seed or "部署" in seed or "流水线" in seed:
-            return f"团队要搭或维护自动化构建发布流水线时，可用 {name} 承接 CI/CD。"
-        if "文件" in seed or "终端" in seed or "CLI" in seed:
-            return f"日常在终端里高频翻目录、整理项目文件时，可用 {name} 提升操作效率。"
-        if "语音" in seed or "视频" in seed:
-            return f"要做本地语音/视频理解或交互原型时，可直接基于 {name} 起步。"
-        if "GIS" in seed or "地理" in seed or "地图" in seed:
-            return f"需要在 Web/Notebook 里看地图、分析空间数据时，可用 {name}。"
-        # 最后用项目名保证每条都不同
-        tip = (intro or highlight or repo.get("description") or lang).strip()
-        tip = tip[:28].rstrip("，。；; ")
-        return f"当你需要「{tip}」这类能力时，可以优先试用 {name}。"
+            tech = f"量化开发者做策略回测/因子实验时，可用 {name} 搭本地行情与研究环境。"
+            general = f"关注股市或量化投资的人，想自己复盘历史行情、验证交易想法时，可用它做数据底座。"
+        elif "模型" in seed or "Agent" in seed or "智能体" in seed or "LLM" in seed.upper() or "大模型" in seed:
+            tech = f"工程师要把业务接到多家大模型或搭 Agent 原型时，可用 {name} 做集成与验证。"
+            general = f"产品/运营想快速试一个 AI 助手或智能客服想法时，可先基于 {name} 做可演示原型。"
+        elif "CI" in seed or "Jenkins" in seed or "部署" in seed or "流水线" in seed:
+            tech = f"研发/运维要搭构建测试发布流水线时，可用 {name} 承接自动化。"
+            general = f"小团队想减少手工发版出错、让上线更稳时，可把它当作自动化发布中枢。"
+        elif "文件" in seed or "终端" in seed or "CLI" in seed:
+            tech = f"开发者在终端高频翻代码目录时，可用 {name} 加快文件浏览与整理。"
+            general = f"习惯键盘操作、想把电脑文件管理做得更顺手的人，也可以用它替代部分图形界面。"
+        elif "语音" in seed or "视频" in seed:
+            tech = f"要做本地语音/视频理解或实时交互时，可基于 {name} 起步开发。"
+            general = f"创作者或播客作者想让 AI「听懂/看懂」音视频并辅助总结时，可试用这类能力。"
+        elif "GIS" in seed or "地理" in seed or "地图" in seed:
+            tech = f"需要在 Web/Notebook 里做地图可视化与空间分析时，可用 {name}。"
+            general = f"做城市研究、门店选址或出行数据展示的人，可用它把地理信息做成直观地图。"
+        else:
+            tip = (intro or highlight or repo.get("description") or "相关能力").strip()
+            tip = tip[:24].rstrip("，。；; ")
+            tech = f"开发者要在项目里落地「{tip}」时，可优先评估接入 {name}。"
+            general = f"非技术同学若关心「{tip}」这类能力，也可把它当作可试用的开源方案来了解。"
+        return tech, general
 
     def _fix_duplicate_scenarios(self, repos, analyses):
-        """批量结果若应用场景重复/套话，逐条重写，保证每条都不同。"""
-        seen = {}
+        """技术向/非技术向若套话或互相重复，则重写。"""
+        seen_tech, seen_general = set(), set()
         for repo in repos:
             name = repo["name"]
-            item = analyses.get(name) or self._fallback(repo)
-            scenario = (item.get("scenario") or "").strip()
-            dup = scenario in seen or self._is_generic_scenario(scenario)
-            if dup:
-                log(f"应用场景需重写：{name} <- {scenario[:40]}", "WARNING")
+            item = dict(analyses.get(name) or self._fallback(repo))
+            tech = (item.get("scenario_tech") or "").strip()
+            general = (item.get("scenario_general") or "").strip()
+            bad = (
+                self._is_generic_scenario(tech)
+                or self._is_generic_scenario(general)
+                or tech in seen_tech
+                or general in seen_general
+                or tech == general
+            )
+            if bad:
+                log(f"双场景需重写：{name}", "WARNING")
                 try:
-                    rewritten = self._rewrite_scenario(repo, item)
-                    item = dict(item)
-                    item["scenario"] = rewritten
-                    item["audience"] = rewritten
+                    tech, general = self._rewrite_scenario_pair(repo, item)
                 except Exception as e:
-                    log(f"应用场景重写失败 {name}：{e}", "WARNING")
-                    item = dict(item)
-                    item["scenario"] = self._scenario_from_parts(
+                    log(f"双场景重写失败 {name}：{e}", "WARNING")
+                    tech, general = self._scenario_pair_from_parts(
                         repo, item.get("intro", ""), item.get("highlight", "")
                     )
-                    item["audience"] = item["scenario"]
-            seen[item["scenario"]] = name
+            seen_tech.add(tech)
+            seen_general.add(general)
+            item["scenario_tech"] = tech
+            item["scenario_general"] = general
+            item["scenario"] = f"技术向：{tech}；非技术向：{general}"
+            item["audience"] = item["scenario"]
             analyses[name] = item
         return analyses
 
-    def _rewrite_scenario(self, repo, item):
+    def _rewrite_scenario_pair(self, repo, item):
         prompt = (
             f"项目: {repo['name']}\n"
             f"简介: {item.get('intro')}\n"
             f"亮点: {item.get('highlight')}\n"
             f"原始描述: {repo.get('description')}\n\n"
-            "请只返回一条「应用场景」中文句子（30～70字）：\n"
-            "- 必须写成「什么人 + 在什么具体情况下 + 用它做什么」\n"
-            "- 禁止套话：不要写「适合开发者了解试用」「对该技术感兴趣」这类空话\n"
-            "- 不要和其他项目撞车，要能看出这是本项目专属场景\n"
-            "- 只返回场景正文，不要 JSON，不要前缀"
+            "请返回 JSON："
+            '{"scenario_tech":"技术向场景","scenario_general":"非技术向场景"}\n'
+            "要求：\n"
+            "- scenario_tech：程序员/工程师视角，30～70字，写具体开发或集成情境\n"
+            "- scenario_general：产品、运营、投资、创作者等非程序员视角，30～70字\n"
+            "- 两条必须明显不同，禁止套话（如「适合开发者了解试用」）\n"
+            "- 只返回 JSON"
         )
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {
                     "role": "system",
-                    "content": "你专门写具体应用场景，拒绝空泛套话。",
+                    "content": "你同时为技术读者与非技术读者写应用场景，拒绝空泛套话。",
                 },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            max_tokens=160,
+            max_tokens=280,
         )
-        text = (response.choices[0].message.content or "").strip().strip('"“”')
-        text = text.replace("应用场景：", "").replace("应用场景:", "").strip()
-        if self._is_generic_scenario(text):
-            return self._scenario_from_parts(
+        parsed = self._parse_result(response.choices[0].message.content or "")
+        tech = (parsed.get("scenario_tech") or "").strip()
+        general = (parsed.get("scenario_general") or "").strip()
+        if self._is_generic_scenario(tech) or self._is_generic_scenario(general) or not tech or not general:
+            return self._scenario_pair_from_parts(
                 repo, item.get("intro", ""), item.get("highlight", "")
             )
-        return text
+        return tech, general
 
     def _normalize_analysis(self, item, repo=None):
         intro = (
@@ -469,22 +491,51 @@ class SiliconFlowSummarizer:
             or item.get("why_hot")
             or ""
         ).strip()
-        # 不再把 audience 当应用场景，避免批量时被写成同一句「适合谁」
-        scenario = (item.get("scenario") or item.get("应用场景") or "").strip()
+        tech = (
+            item.get("scenario_tech")
+            or item.get("技术向")
+            or item.get("tech_scenario")
+            or ""
+        ).strip()
+        general = (
+            item.get("scenario_general")
+            or item.get("非技术向")
+            or item.get("general_scenario")
+            or item.get("biz_scenario")
+            or ""
+        ).strip()
+        # 兼容旧单字段：尽量拆不开就整段放到技术向，再补非技术向
+        legacy = (item.get("scenario") or item.get("应用场景") or "").strip()
+        if legacy and (not tech or not general):
+            if "非技术向" in legacy and "技术向" in legacy:
+                parts = legacy.split("非技术向")
+                tech = tech or parts[0].replace("技术向：", "").replace("技术向:", "").strip(" ；;")
+                general = general or parts[-1].lstrip("：: ").strip()
+            elif not tech:
+                tech = legacy
+
         category = (item.get("category") or item.get("分类") or "").strip()
         if category not in self.CATEGORY_CHOICES:
-            category = self._guess_category(repo, intro + highlight + scenario)
+            category = self._guess_category(repo, intro + highlight + tech + general)
         if not intro and repo is not None:
             return self._fallback(repo)
-        if (not scenario or self._is_generic_scenario(scenario)) and repo is not None:
-            scenario = self._scenario_from_parts(repo, intro, highlight)
+        if repo is not None and (
+            not tech
+            or not general
+            or self._is_generic_scenario(tech)
+            or self._is_generic_scenario(general)
+            or tech == general
+        ):
+            tech, general = self._scenario_pair_from_parts(repo, intro, highlight)
         return {
             "category": category,
             "intro": intro or "暂无简介",
             "highlight": highlight or "今日热榜项目，可点开仓库进一步了解。",
-            "scenario": scenario,
+            "scenario_tech": tech,
+            "scenario_general": general,
+            "scenario": f"技术向：{tech}；非技术向：{general}",
             "chinese_description": intro,
-            "audience": scenario,
+            "audience": f"技术向：{tech}；非技术向：{general}",
         }
 
     def _guess_category(self, repo, text):
@@ -515,20 +566,22 @@ class SiliconFlowSummarizer:
             "好例子：\n"
             "简介：吴恩达团队推出的轻量级 Python 库。\n"
             "亮点：统一对接 OpenAI/Anthropic/Google 等多家模型，降低多模型集成门槛。\n"
-            "应用场景：后端要把同一套业务接到多家大模型，并希望一行配置就能切换供应商时。\n\n"
+            "技术向：后端要把同一套业务接到多家大模型，并希望一行配置就能切换供应商时。\n"
+            "非技术向：产品经理想对比不同 AI 供应商效果、先做出可演示原型给业务看时。\n\n"
             "坏例子（禁止）：\n"
-            "应用场景：适合对该技术感兴趣的开发者了解试用。\n"
-            "应用场景：适合相关开发者浏览试用。\n\n"
+            "技术向/非技术向：适合对该技术感兴趣的开发者了解试用。\n"
+            "两条写成几乎一样的空话。\n\n"
             "每个项目必须返回字段：\n"
             f"1. category：只能从这些里选一个——{cats}\n"
             "2. intro（简介）：40～90 字。先说「谁做的/什么东西」，再说核心能力。\n"
             "3. highlight（亮点）：40～90 字。写具体能力或差异点，不要空泛夸奖。\n"
-            "4. scenario（应用场景）：30～70 字。必须是「什么人 + 什么具体工作场景 + 用它完成什么」；"
-            "每个项目都要不同，禁止互相复制，禁止空泛套话。\n\n"
+            "4. scenario_tech（技术向）：30～70 字，程序员/工程师视角的具体工作场景。\n"
+            "5. scenario_general（非技术向）：30～70 字，产品/运营/投资/创作者等非程序员视角。\n"
+            "两条必须明显不同；每个项目都要不同；禁止空泛套话。\n\n"
             "硬性要求：全中文；不要照抄英文原句；只返回 JSON 数组；不要 markdown。\n"
             "格式：\n"
             '[{"name":"owner/repo","category":"🤖 AI 智能体与大模型生态",'
-            '"intro":"...","highlight":"...","scenario":"..."}]\n\n'
+            '"intro":"...","highlight":"...","scenario_tech":"...","scenario_general":"..."}]\n\n'
             + "\n".join(items)
         )
         response = self.client.chat.completions.create(
@@ -538,14 +591,13 @@ class SiliconFlowSummarizer:
                     "role": "system",
                     "content": (
                         "你是中文科技媒体编辑，擅长把 GitHub 热榜整理成分类早报："
-                        "有简介、有亮点、有应用场景，读完就知道项目能干嘛。"
+                        "有简介、有亮点，并同时给出技术向与非技术向应用场景。"
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.55,
-            # 页面条目增多时预留输出空间（约 13～25 条）
-            max_tokens=min(8000, 400 * max(8, len(repos))),
+            max_tokens=min(9000, 520 * max(8, len(repos))),
         )
         result_text = response.choices[0].message.content or ""
         log(f"批量分析原始返回长度: {len(result_text)}")
@@ -567,11 +619,11 @@ class SiliconFlowSummarizer:
             f"项目: {repo['name']}\n语言: {repo.get('language')}\n"
             f"描述: {repo.get('description')}\n\n"
             "请返回 JSON："
-            '{"name":"owner/repo","category":"...", "intro":"简介",'
-            '"highlight":"亮点","scenario":"应用场景"}。\n'
+            '{"name":"owner/repo","category":"...","intro":"简介",'
+            '"highlight":"亮点","scenario_tech":"技术向","scenario_general":"非技术向"}。\n'
             f"category 只能是：{cats}\n"
             "风格：科技早报，大白话，具体，不要空夸。\n"
-            "应用场景必须写具体工作情境，禁止「适合开发者了解试用」这类套话。"
+            "必须同时给技术向与非技术向场景，两条明显不同，禁止套话。"
         )
         response = self.client.chat.completions.create(
             model=self.model,
@@ -639,8 +691,10 @@ class SiliconFlowSummarizer:
             pass
         return {
             "chinese_description": (result_text or "").strip()[:140] or "暂无中文描述",
-            "audience": "对相关技术感兴趣的开发者",
+            "intro": (result_text or "").strip()[:140] or "暂无中文描述",
             "highlight": "今日热榜项目",
+            "scenario_tech": "",
+            "scenario_general": "",
         }
 
 # ==============================================================================
@@ -703,13 +757,13 @@ class AgentSkillsBeautifier:
         return "\n".join(lines)
 
     def _build_repo_card(self, repo, index=None):
-        """单项目：标题 + 简介 + 亮点 + 应用场景。"""
+        """单项目：标题 + 简介 + 亮点 + 技术向/非技术向场景。"""
         del index
         ai = repo.get("ai_analysis") or {}
         intro = (ai.get("intro") or ai.get("chinese_description") or "").strip() or "暂无简介"
         highlight = (ai.get("highlight") or "").strip() or "今日热榜项目"
-        scenario = (ai.get("scenario") or "").strip() or "场景待补充，建议点进仓库 README 查看用法"
-        # 展示成 owner / repo，更接近早报阅读习惯
+        tech = (ai.get("scenario_tech") or "").strip() or "技术场景待补充"
+        general = (ai.get("scenario_general") or "").strip() or "非技术场景待补充"
         name = repo.get("name") or ""
         pretty = name.replace("/", " / ") if "/" in name else name
         stars = (
@@ -723,7 +777,8 @@ class AgentSkillsBeautifier:
                 stars,
                 f"简介：{intro}",
                 f"亮点：{highlight}",
-                f"应用场景：{scenario}",
+                f"技术向：{tech}",
+                f"非技术向：{general}",
             ]
         )
     
