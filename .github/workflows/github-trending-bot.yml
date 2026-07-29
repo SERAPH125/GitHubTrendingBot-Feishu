@@ -28,9 +28,11 @@ jobs:
 
       - name: 运行机器人
         env:
-          # 硅基流动 API 配置
+          # DeepSeek 官方（推荐）或硅基流动，二选一
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
-          SILICONFLOW_MODEL: ${{ secrets.SILICONFLOW_MODEL || 'deepseek-ai/DeepSeek-V3' }}
+          SILICONFLOW_MODEL: ${{ secrets.SILICONFLOW_MODEL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
           SILICONFLOW_TIMEOUT: ${{ secrets.SILICONFLOW_TIMEOUT || '60' }}
 
           # 飞书机器人配置

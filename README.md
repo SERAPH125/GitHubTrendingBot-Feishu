@@ -5,7 +5,7 @@
 ## ✨ 功能特点
 
 - 📊 **每日热榜**：自动获取 GitHub Trending 当日热门项目
-- 🤖 **AI 分析**：使用硅基流动 AI（DeepSeek-V3）智能分析项目亮点
+- 🤖 **AI 分析**：支持 DeepSeek 官方 API 或硅基流动，智能分析项目亮点
 - 🎨 **内容美化**：生成格式精美的 Markdown 内容，带编程语言 emoji
 - 📱 **飞书推送**：通过飞书机器人富文本卡片推送
 - ⏰ **定时任务**：支持 GitHub Actions 定时运行
@@ -41,8 +41,10 @@
 
 | Secret 名称 | 说明 | 获取方式 | 示例值 |
 |------------|------|---------|--------|
-| `SILICONFLOW_API_KEY` | 硅基流动 API Key | [硅基流动官网](https://siliconflow.cn) 注册获取 | `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
+| `DEEPSEEK_API_KEY`（推荐）或 `SILICONFLOW_API_KEY` | AI Key，二选一 | [DeepSeek 开放平台](https://platform.deepseek.com) 或 [硅基流动](https://siliconflow.cn) | `sk-xxxxxxxx` |
 | `FEISHU_WEBHOOK_URL` | 飞书机器人 Webhook URL | 飞书群聊添加自定义机器人获取 | `https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+
+配置 `DEEPSEEK_API_KEY` 时，默认走 `https://api.deepseek.com`，模型默认 `deepseek-chat`。
 
 **操作截图说明：**
 

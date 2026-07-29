@@ -19,10 +19,21 @@ import sys
 
 import os
 
-# 硅基流动 API 配置
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "")
-SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-SILICONFLOW_MODEL = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3")
+# AI API 配置（兼容硅基流动 / DeepSeek 官方）
+# 优先读 DEEPSEEK_API_KEY；也可用 SILICONFLOW_API_KEY
+SILICONFLOW_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("SILICONFLOW_API_KEY", "")
+_default_base = (
+    "https://api.deepseek.com"
+    if os.getenv("DEEPSEEK_API_KEY")
+    else "https://api.siliconflow.cn/v1"
+)
+_default_model = (
+    "deepseek-chat"
+    if os.getenv("DEEPSEEK_API_KEY")
+    else "deepseek-ai/DeepSeek-V3"
+)
+SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL", _default_base)
+SILICONFLOW_MODEL = os.getenv("SILICONFLOW_MODEL") or os.getenv("DEEPSEEK_MODEL", _default_model)
 SILICONFLOW_TIMEOUT = int(os.getenv("SILICONFLOW_TIMEOUT", "60"))
 
 # 飞书机器人配置
@@ -52,7 +63,7 @@ def validate_env():
     errors = []
 
     if not SILICONFLOW_API_KEY:
-        errors.append("未配置 SILICONFLOW_API_KEY 环境变量")
+        errors.append("未配置 DEEPSEEK_API_KEY 或 SILICONFLOW_API_KEY 环境变量")
 
     if not FEISHU_WEBHOOK_URL:
         errors.append("未配置 FEISHU_WEBHOOK_URL 环境变量")
