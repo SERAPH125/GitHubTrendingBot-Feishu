@@ -336,28 +336,51 @@ class SiliconFlowSummarizer:
     def _fallback(self, repo):
         raw = (repo.get("description") or "").strip()
         return {
-            "chinese_description": f"（暂无中文摘要）{raw[:80]}" if raw else "暂无项目描述",
-            "highlight": "今日热榜项目，可点开仓库查看",
+            "chinese_description": (
+                f"这是一个开源项目。官方简介：{raw[:120]}。当前缺少更详细中文解读，建议点进仓库看 README。"
+                if raw
+                else "暂无项目描述，建议点进仓库查看 README。"
+            ),
+            "audience": "对相关技术感兴趣的开发者",
+            "highlight": "今日热榜项目，可点开仓库进一步了解",
+        }
+
+    def _normalize_analysis(self, item, repo=None):
+        desc = (item.get("chinese_description") or item.get("summary") or "").strip()
+        audience = (item.get("audience") or item.get("who") or "").strip()
+        highlight = (item.get("highlight") or item.get("why_hot") or "").strip()
+        if not desc and repo is not None:
+            return self._fallback(repo)
+        return {
+            "chinese_description": desc or "暂无中文描述",
+            "audience": audience or "对相关技术感兴趣的开发者",
+            "highlight": highlight or "今日热榜项目",
         }
 
     def _analyze_batch(self, repos):
+        """参考 GithubCollectAgent / n8n-github-insight：大白话解读，而非电报式翻译。"""
         items = []
         for i, repo in enumerate(repos, 1):
             items.append(
                 f"{i}. name={repo['name']}\n"
                 f"   language={repo.get('language') or 'Unknown'}\n"
-                f"   stars={repo.get('formatted_stars')}+{repo.get('formatted_today_stars')}today\n"
+                f"   stars={repo.get('formatted_stars')} (+{repo.get('formatted_today_stars')} today)\n"
                 f"   description={repo.get('description') or 'N/A'}"
             )
         prompt = (
-            "下面是今日 GitHub Trending Top 项目列表。请为每个项目生成中文解读。\n"
-            "要求：\n"
-            "1. chinese_description：用中文说明项目是做什么的，通俗易懂，不超过 40 字\n"
-            "2. highlight：一句话亮点/适合谁用，不超过 24 字\n"
-            "3. 必须全部使用中文，不要照抄英文原句\n"
-            "4. 只返回 JSON 数组，不要 markdown，不要其它文字\n\n"
-            "格式：\n"
-            '[{"name":"owner/repo","chinese_description":"...","highlight":"..."}]\n\n'
+            "下面是今日 GitHub Trending Top 项目。请为每个项目写「能看懂」的中文解读。\n"
+            "风格参考：像在跟同事口头介绍，拒绝机翻口号，拒绝只堆术语。\n\n"
+            "每个项目必须包含 3 个字段：\n"
+            "1. chinese_description：80～140 字。先说它是什么产品/工具，再说解决什么问题、"
+            "核心怎么用；必要时用一句类比（例如「类似某某，但更偏…」）。\n"
+            "2. audience：20～40 字。明确适合谁（例如前端、量化、运维、AI 应用开发者）。\n"
+            "3. highlight：30～50 字。今天值得扫一眼的原因，或最吸引人的一点。\n\n"
+            "硬性要求：\n"
+            "- 全部中文，不要照抄英文原句\n"
+            "- 不要空泛夸奖（如「非常强大」「值得关注」单独成句）\n"
+            "- 只返回 JSON 数组，不要 markdown，不要其它文字\n\n"
+            "格式示例：\n"
+            '[{"name":"owner/repo","chinese_description":"...","audience":"...","highlight":"..."}]\n\n'
             + "\n".join(items)
         )
         response = self.client.chat.completions.create(
@@ -365,12 +388,15 @@ class SiliconFlowSummarizer:
             messages=[
                 {
                     "role": "system",
-                    "content": "你是资深中文技术编辑，专门把 GitHub 热榜翻译成简洁中文摘要。",
+                    "content": (
+                        "你是资深中文技术编辑，擅长把 GitHub 热榜讲成人话。"
+                        "读者不一定熟悉每个细分领域，所以要用通俗中文解释清楚项目到底干什么。"
+                    ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.4,
-            max_tokens=2200,
+            temperature=0.5,
+            max_tokens=4500,
         )
         result_text = response.choices[0].message.content or ""
         log(f"批量分析原始返回长度: {len(result_text)}")
@@ -380,11 +406,7 @@ class SiliconFlowSummarizer:
             name = (item.get("name") or "").strip()
             if not name:
                 continue
-            by_name[name] = {
-                "chinese_description": (item.get("chinese_description") or "").strip()
-                or "暂无中文描述",
-                "highlight": (item.get("highlight") or "").strip() or "今日热榜项目",
-            }
+            by_name[name] = self._normalize_analysis(item)
         if len(by_name) < max(1, len(repos) // 2):
             raise RuntimeError(f"批量结果过少：仅解析到 {len(by_name)} 条")
         return by_name
@@ -393,19 +415,27 @@ class SiliconFlowSummarizer:
         prompt = (
             f"项目: {repo['name']}\n语言: {repo.get('language')}\n"
             f"描述: {repo.get('description')}\n\n"
-            "请返回 JSON：{\"chinese_description\":\"中文简介\",\"highlight\":\"中文亮点\"}。"
-            "必须中文，不要照抄英文。"
+            "请返回 JSON："
+            '{"chinese_description":"80-140字中文解读：是什么、解决什么问题、怎么用",'
+            '"audience":"适合谁","highlight":"今天为何值得看"}。'
+            "必须中文大白话，不要照抄英文，不要空泛夸奖。"
         )
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": "你是中文技术编辑，输出简洁中文 JSON。"},
+                {
+                    "role": "system",
+                    "content": "你是中文技术编辑，把开源项目讲成人话，输出 JSON。",
+                },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.4,
-            max_tokens=300,
+            temperature=0.5,
+            max_tokens=500,
         )
-        return self._parse_result(response.choices[0].message.content or "")
+        return self._normalize_analysis(
+            self._parse_result(response.choices[0].message.content or ""),
+            repo=repo,
+        )
 
     def _parse_batch_result(self, result_text):
         try:
@@ -450,15 +480,13 @@ class SiliconFlowSummarizer:
                                 break
                 if end_idx > start_idx:
                     parsed = json.loads(result_text[start_idx:end_idx])
-                    if parsed.get("chinese_description"):
-                        return {
-                            "chinese_description": str(parsed.get("chinese_description")).strip(),
-                            "highlight": str(parsed.get("highlight") or "今日热榜项目").strip(),
-                        }
+                    if parsed.get("chinese_description") or parsed.get("summary"):
+                        return parsed
         except Exception:
             pass
         return {
-            "chinese_description": (result_text or "").strip()[:80] or "暂无中文描述",
+            "chinese_description": (result_text or "").strip()[:140] or "暂无中文描述",
+            "audience": "对相关技术感兴趣的开发者",
             "highlight": "今日热榜项目",
         }
 
@@ -507,20 +535,23 @@ class AgentSkillsBeautifier:
         return "\n".join(lines)
     
     def _build_repo_card(self, repo, index):
-        """构建单个项目的卡片（突出中文解读）"""
+        """构建单个项目的卡片（完整中文解读：是什么 / 适合谁 / 看点）"""
         lines = []
         language_emoji = self._get_language_emoji(repo['language'])
         ai_analysis = repo.get('ai_analysis') or {}
         chinese_desc = (ai_analysis.get('chinese_description') or '').strip() or '暂无中文描述'
+        audience = (ai_analysis.get('audience') or '').strip()
         highlight = (ai_analysis.get('highlight') or '').strip()
 
-        lines.append(f"{index}. **[{repo['name']}]({repo['url']})**")
+        lines.append(f"**{index}. [{repo['name']}]({repo['url']})**")
         lines.append(
-            f"⭐ {repo['formatted_stars']} · {language_emoji} {repo['language'] or 'Unknown'} · 📈 +{repo['formatted_today_stars']}"
+            f"⭐ {repo['formatted_stars']} · {language_emoji} {repo['language'] or 'Unknown'} · 📈 今日+{repo['formatted_today_stars']}"
         )
-        lines.append(f"📝 {chinese_desc}")
+        lines.append(f"📝 **是什么**：{chinese_desc}")
+        if audience:
+            lines.append(f"👥 **适合谁**：{audience}")
         if highlight:
-            lines.append(f"💡 {highlight}")
+            lines.append(f"💡 **看点**：{highlight}")
         return "\n".join(lines)
     
     def _get_language_emoji(self, language):
@@ -617,27 +648,44 @@ class FeishuNotifier:
     
     def _build_card_message(self, markdown_content):
         """构建富文本卡片消息（Top10 全量中文解读）"""
-        title = "🚀 GitHub 热榜日报（中文解读）"
-        # 飞书单卡片文本过长会失败，必要时拆成两段
+        title = "🚀 GitHub 热榜日报（中文详解）"
         body = markdown_content.strip()
-        if len(body) > 3500:
-            body = body[:3400] + "\n\n…内容过长已截断，完整榜单见 GitHub Trending"
-        body += "\n\n---\n📊 数据：github.com/trending · 🧠 DeepSeek 中文摘要"
+        body += "\n\n---\n📊 数据：github.com/trending · 🧠 DeepSeek 白话解读"
 
+        # 飞书单段 lark_md 过长易失败：按项目块拆成多段
+        chunks = self._split_markdown_chunks(body, max_len=1800)
+        elements = [
+            {"tag": "div", "text": {"tag": "lark_md", "content": chunk}}
+            for chunk in chunks
+        ]
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "blue",
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": body},
-                }
-            ],
+            "elements": elements,
         }
         return {"msg_type": "interactive", "card": card}
+
+    def _split_markdown_chunks(self, text, max_len=1800):
+        """按空行块切分，避免单卡片超长。"""
+        blocks = text.split("\n\n")
+        chunks = []
+        current = []
+        current_len = 0
+        for block in blocks:
+            block_len = len(block) + 2
+            if current and current_len + block_len > max_len:
+                chunks.append("\n\n".join(current))
+                current = [block]
+                current_len = len(block)
+            else:
+                current.append(block)
+                current_len += block_len
+        if current:
+            chunks.append("\n\n".join(current))
+        return chunks or [text[:max_len]]
 
 # ==============================================================================
 # 主程序
